@@ -21,8 +21,8 @@ strategy(
 // Inputs
 // ============================================================================
 string GROUP_DATA = "Order Flow Data"
-string lowerTf = input.timeframe("1T", "Delta lower timeframe", group = GROUP_DATA,
-     tooltip = "1T gives the most granular TradingView/ta delta and can use bid/ask comparisons when available. Use 1 minute if tick history is unavailable or too short for the backtest.")
+string lowerTf = input.timeframe("1", "Delta lower timeframe", group = GROUP_DATA,
+     tooltip = "Default is 1 minute for compatibility with TradingView plans that do not support tick-based requests. Tick timeframes such as 1T require Expert or higher.")
 string cvdAnchorTf = input.timeframe("1D", "CVD reset period", group = GROUP_DATA,
      tooltip = "Cumulative delta resets at this anchor. Divergences are only compared inside the same anchor period by default.")
 bool requireSameAnchor = input.bool(true, "Require pivots in same CVD period", group = GROUP_DATA)
@@ -68,7 +68,6 @@ float aggressorTotal = buyVolume + sellVolume
 float buyRatio = aggressorTotal > 0 ? buyVolume / aggressorTotal : na
 float sellRatio = aggressorTotal > 0 ? sellVolume / aggressorTotal : na
 
-// Keep the raw series available in TradingView's Data Window without cluttering price.
 plot(cvdClose, "Cumulative Delta", display = display.data_window)
 plot(barDelta, "Bar Delta", display = display.data_window)
 plot(volume, "Volume", display = display.data_window)
@@ -108,8 +107,6 @@ bool newLowPivot = not na(pivotLow)
 int pivotBarIndex = bar_index - rightBars
 float minPriceMove = minPriceTicks * syminfo.mintick
 
-// Most recent two high pivots. The latest is the comparison pivot for bearish
-// divergence and also the prior-swing target source for bullish trades.
 var float lastHighPrice = na
 var float lastHighCvd = na
 var float lastHighBuyVol = na
@@ -121,7 +118,6 @@ var int lastHighIndex = na
 var float prevHighPrice = na
 var int prevHighIndex = na
 
-// Most recent two low pivots.
 var float lastLowPrice = na
 var float lastLowCvd = na
 var float lastLowSellVol = na
@@ -133,8 +129,6 @@ var int lastLowIndex = na
 var float prevLowPrice = na
 var int prevLowIndex = na
 
-// Signals are calculated on the confirmation bar from values that belonged to
-// the actual pivot bar rightBars bars ago.
 bool bearishDivergence = false
 bool bullishDivergence = false
 float bearishStop = na
@@ -162,7 +156,6 @@ if newHighPivot
     bool aggressorConfirmed = f_aggressorConfirmed(aggressorVolDecline, aggressorRatioDecline, aggressorMode)
     bool totalVolumeConfirmed = not useTotalVolumeDecline or f_declined(currentTotalVol, lastHighTotalVol, minAggressorDeclinePct)
 
-    // Most recent confirmed swing low that occurred before this divergence pivot.
     float priorSwingLow = na
     if not na(lastLowIndex) and lastLowIndex < currentIndex
         priorSwingLow := lastLowPrice
@@ -209,7 +202,6 @@ if newLowPivot
     bool aggressorConfirmed = f_aggressorConfirmed(aggressorVolDecline, aggressorRatioDecline, aggressorMode)
     bool totalVolumeConfirmed = not useTotalVolumeDecline or f_declined(currentTotalVol, lastLowTotalVol, minAggressorDeclinePct)
 
-    // Most recent confirmed swing high that occurred before this divergence pivot.
     float priorSwingHigh = na
     if not na(lastHighIndex) and lastHighIndex < currentIndex
         priorSwingHigh := lastHighPrice
@@ -247,8 +239,6 @@ bool deltaAvailable = not na(cvdClose) and not na(barDelta) and aggressorTotal >
 bool longSignal = bullishDivergence and timeframeAllowed and deltaAvailable
 bool shortSignal = bearishDivergence and timeframeAllowed and deltaAvailable
 
-// If a pathological outside bar confirms both setups at once, do not choose a
-// direction arbitrarily.
 bool enterLong = longSignal and not shortSignal and strategy.position_size == 0
 bool enterShort = shortSignal and not longSignal and strategy.position_size == 0
 
@@ -272,7 +262,6 @@ else if enterShort
     strategy.exit("Short Exit", from_entry = "Short", stop = activeStop, limit = activeTarget)
     alert("Bearish CVD divergence confirmed: price HH, CVD LH, declining buy aggression.", alert.freq_once_per_bar_close)
 
-// Clear display levels only after a filled position has returned to flat.
 if strategy.position_size == 0 and strategy.position_size[1] != 0
     activeStop := na
     activeTarget := na
