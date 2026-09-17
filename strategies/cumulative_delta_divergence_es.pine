@@ -13,71 +13,87 @@ strategy(
      commission_value = 2.25,
      slippage = 1,
      calc_on_order_fills = true,
-     process_orders_on_close = false,
+     process_orders_on_close = true,
      max_lines_count = 500,
      max_labels_count = 500)
 
 // ============================================================================
-// Data
+// 01. Order-flow data
 // ============================================================================
 string GROUP_DATA = "01. Order Flow Data"
 string lowerTf = input.timeframe("1", "Delta lower timeframe", group = GROUP_DATA,
-     tooltip = "Default is 1 minute so the script works without TradingView Expert. Tick timeframes such as 1T require Expert or higher. PineScriptForge's published audit uses CME tick data, so 1-minute reconstruction will not exactly reproduce it.")
+     tooltip = "1 minute is the plan-compatible default. It estimates delta from lower-timeframe price direction. TradingView tick requests such as 1T can use bid/ask comparisons when available, but require Expert or higher.")
 string cvdAnchorTf = input.timeframe("1D", "CVD reset period", group = GROUP_DATA)
 bool requireSameAnchor = input.bool(true, "Require pivots in same CVD period", group = GROUP_DATA)
-string deltaPivotSource = input.string("High / Low", "CVD pivot value", options = ["High / Low", "Close"], group = GROUP_DATA,
-     tooltip = "High / Low compares CVD highs at price highs and CVD lows at price lows. Close compares CVD close values on the pivot bars.")
+string deltaPivotSource = input.string("Close", "CVD value at price pivot", options = ["Close", "High / Low"], group = GROUP_DATA,
+     tooltip = "Close compares cumulative delta at the actual price-pivot bars. High / Low instead uses the intrabar CVD extreme.")
 
 // ============================================================================
-// Divergence / swing definition
+// 02. Swing / divergence
 // ============================================================================
 string GROUP_SWING = "02. Swing / Divergence"
 int leftBars = input.int(3, "Pivot left bars", minval = 1, maxval = 20, group = GROUP_SWING)
-int rightBars = input.int(3, "Pivot right bars", minval = 1, maxval = 20, group = GROUP_SWING,
-     tooltip = "The pivot is only used after this many right-side bars confirm it. This avoids repainting.")
-int minPivotSeparation = input.int(3, "Minimum bars between same-side pivots", minval = 1, group = GROUP_SWING)
-int maxPivotSeparation = input.int(60, "Maximum bars between same-side pivots", minval = 2, group = GROUP_SWING)
-int minPriceTicks = input.int(1, "Minimum HH / LL difference (ticks)", minval = 0, group = GROUP_SWING)
+int rightBars = input.int(2, "Pivot right bars", minval = 1, maxval = 20, group = GROUP_SWING,
+     tooltip = "Signals wait for confirmed pivots. Lower values reduce reversal-entry lag but make swings less selective.")
+int minPivotSeparation = input.int(4, "Minimum bars between same-side pivots", minval = 1, group = GROUP_SWING)
+int maxPivotSeparation = input.int(40, "Maximum bars between same-side pivots", minval = 2, group = GROUP_SWING)
+int minPriceTicks = input.int(2, "Minimum HH / LL difference (ticks)", minval = 0, group = GROUP_SWING)
 float minCvdDifferencePct = input.float(0.0, "Minimum CVD divergence (%)", minval = 0.0, step = 0.1, group = GROUP_SWING,
      tooltip = "0 means any strict CVD lower high / higher low qualifies.")
+bool requireInterveningSwing = input.bool(true, "Require opposite swing between divergence pivots", group = GROUP_SWING,
+     tooltip = "Bearish structure must be High 1 -> swing low -> higher High 2. Bullish structure must be Low 1 -> swing high -> lower Low 2. The intervening swing becomes the prior-swing target.")
+float maxEntryDriftAtr = input.float(0.60, "Maximum entry drift from pivot (ATR)", minval = 0.0, step = 0.05, group = GROUP_SWING,
+     tooltip = "Rejects divergences already too far into the reversal by the time the pivot confirms. 0 disables this filter.")
 
 // ============================================================================
-// Aggressor confirmation
+// 03. Aggressor confirmation
 // ============================================================================
 string GROUP_CONFIRM = "03. Aggressor Confirmation"
-string aggressorMode = input.string("Volume + Ratio", "Confirmation mode",
-     options = ["Volume only", "Ratio only", "Volume + Ratio"], group = GROUP_CONFIRM)
-float minAggressorDeclinePct = input.float(0.0, "Minimum aggressor decline (%)", minval = 0.0, maxval = 100.0, step = 0.5, group = GROUP_CONFIRM)
-float minInitialAggressorRatioPct = input.float(0.0, "Minimum aggressor ratio at first pivot (%)", minval = 0.0, maxval = 100.0, step = 1.0, group = GROUP_CONFIRM,
-     tooltip = "Optional exhaustion-quality filter. 0 disables it. For bearish divergence this checks buy aggression at the first high. For bullish divergence it checks sell aggression at the first low.")
+string aggressorMode = input.string("Volume only", "Declining aggressor confirmation",
+     options = ["Volume only", "Ratio only", "Volume + Ratio"], group = GROUP_CONFIRM,
+     tooltip = "The published rule explicitly requires declining aggressor volume. Ratio can be added as a stricter confirmation.")
+float minAggressorDeclinePct = input.float(5.0, "Minimum aggressor decline (%)", minval = 0.0, maxval = 100.0, step = 0.5, group = GROUP_CONFIRM)
+float minInitialAggressorRatioPct = input.float(52.0, "Minimum aggressor ratio at first pivot (%)", minval = 0.0, maxval = 100.0, step = 1.0, group = GROUP_CONFIRM,
+     tooltip = "Bearish: buy ratio at High 1. Bullish: sell ratio at Low 1. Set 0 to disable.")
 bool useTotalVolumeDecline = input.bool(false, "Also require lower total volume", group = GROUP_CONFIRM)
-bool useRelativeVolumeFilter = input.bool(false, "Require minimum relative volume", group = GROUP_CONFIRM)
+bool useRelativeVolumeFilter = input.bool(true, "Require minimum relative volume", group = GROUP_CONFIRM)
 int volumeAverageLength = input.int(20, "Volume average length", minval = 2, group = GROUP_CONFIRM)
-float minVolumeVsAveragePct = input.float(80.0, "Minimum volume vs average (%)", minval = 0.0, step = 5.0, group = GROUP_CONFIRM)
+float minVolumeVsAveragePct = input.float(90.0, "Minimum pivot volume vs average (%)", minval = 0.0, step = 5.0, group = GROUP_CONFIRM)
 
 // ============================================================================
-// Stops and targets
+// 04. Regime filter
 // ============================================================================
-string GROUP_EXIT = "04. Stops / Targets"
+string GROUP_REGIME = "04. Regime Filter"
+bool useAdxFilter = input.bool(true, "Require ADX regime", group = GROUP_REGIME,
+     tooltip = "PineScriptForge notes consolidation whipsaw on ES and specifically suggests ADX > 20 as a false-signal filter.")
+int adxDiLength = input.int(14, "DI length", minval = 1, group = GROUP_REGIME)
+int adxSmoothing = input.int(14, "ADX smoothing", minval = 1, group = GROUP_REGIME)
+float minAdx = input.float(20.0, "Minimum ADX", minval = 0.0, step = 0.5, group = GROUP_REGIME)
+
+// ============================================================================
+// 05. Stops / targets
+// ============================================================================
+string GROUP_EXIT = "05. Stops / Targets"
 string stopMode = input.string("Divergence pivot", "Stop mode", options = ["Divergence pivot", "Pivot + ATR buffer"], group = GROUP_EXIT)
 int stopBufferTicks = input.int(1, "Pivot stop buffer (ticks)", minval = 0, group = GROUP_EXIT)
 int atrLength = input.int(14, "ATR length", minval = 1, group = GROUP_EXIT)
 float atrBufferMultiple = input.float(0.25, "ATR buffer multiple", minval = 0.0, step = 0.05, group = GROUP_EXIT)
-string targetMode = input.string("Prior swing", "Target mode", options = ["Prior swing", "Risk / Reward", "Nearest of swing or R:R"], group = GROUP_EXIT)
+float maxStopAtr = input.float(1.25, "Maximum entry-to-stop distance (ATR)", minval = 0.0, step = 0.05, group = GROUP_EXIT,
+     tooltip = "Rejects unusually wide divergence stops. 0 disables the filter.")
+string targetMode = input.string("Prior swing", "Target mode", options = ["Prior swing", "Risk / Reward", "Farther of swing or R:R"], group = GROUP_EXIT)
 float targetRR = input.float(2.0, "Risk / Reward target", minval = 0.1, step = 0.1, group = GROUP_EXIT)
-int targetBufferTicks = input.int(0, "Front-run prior swing by ticks", minval = 0, group = GROUP_EXIT)
-float minimumRR = input.float(0.0, "Minimum setup R:R", minval = 0.0, step = 0.1, group = GROUP_EXIT,
-     tooltip = "0 disables the filter. R:R is measured from the signal close to the selected stop and target.")
+int targetBufferTicks = input.int(1, "Front-run prior swing by ticks", minval = 0, group = GROUP_EXIT)
+float minimumRR = input.float(1.50, "Minimum setup R:R", minval = 0.0, step = 0.1, group = GROUP_EXIT,
+     tooltip = "Rejects poor-payoff setups. The published ES result describes an asymmetric payoff profile with winners materially larger than losses. 0 disables this filter.")
 float maximumRR = input.float(0.0, "Maximum setup R:R", minval = 0.0, step = 0.5, group = GROUP_EXIT,
-     tooltip = "0 disables the cap. Useful for rejecting stale or extremely distant prior-swing targets.")
+     tooltip = "0 disables the cap.")
 
 // ============================================================================
-// Risk / position sizing
+// 06. Risk / position sizing
 // ============================================================================
-string GROUP_RISK = "05. Risk / Position Sizing"
+string GROUP_RISK = "06. Risk / Position Sizing"
 string riskPreset = input.string("Standard", "Risk preset", options = ["Standard", "Conservative", "Aggressive", "Custom"], group = GROUP_RISK,
-     tooltip = "PineScriptForge describes Conservative as 0.70x stop scale / 0.65x size and Aggressive as 1.40x stop scale / 1.50x size. Pivot anchoring is always preserved.")
-float customStopScale = input.float(1.0, "Custom stop scale", minval = 0.1, step = 0.05, group = GROUP_RISK)
+     tooltip = "PineScriptForge publishes 0.65x size for Conservative and 1.50x for Aggressive. Exact stop-profile multipliers are not published, so stop placement remains controlled explicitly above.")
 float customSizeScale = input.float(1.0, "Custom size scale", minval = 0.1, step = 0.05, group = GROUP_RISK)
 string sizingMode = input.string("Fixed contracts", "Sizing mode", options = ["Fixed contracts", "Risk % of equity", "Fixed dollar risk"], group = GROUP_RISK)
 int fixedContracts = input.int(1, "Fixed contracts", minval = 1, group = GROUP_RISK)
@@ -85,37 +101,37 @@ float riskPercent = input.float(1.0, "Risk per trade (%)", minval = 0.05, maxval
 float fixedDollarRisk = input.float(250.0, "Fixed dollar risk", minval = 1.0, step = 25.0, group = GROUP_RISK)
 int maxContracts = input.int(10, "Maximum contracts", minval = 1, group = GROUP_RISK)
 bool includeFrictionInSizing = input.bool(true, "Include estimated friction in risk sizing", group = GROUP_RISK)
-float roundTurnCommission = input.float(4.50, "Round-turn commission / contract ($)", minval = 0.0, step = 0.25, group = GROUP_RISK,
-     tooltip = "Used only for risk sizing. Strategy P&L commission remains controlled in the Properties tab / strategy() declaration.")
-int sizingSlippageTicksPerSide = input.int(1, "Sizing slippage (ticks / side)", minval = 0, group = GROUP_RISK,
-     tooltip = "Used only for risk sizing. Strategy P&L slippage remains controlled in the Properties tab / strategy() declaration.")
+float roundTurnCommission = input.float(4.50, "Round-turn commission / contract ($)", minval = 0.0, step = 0.25, group = GROUP_RISK)
+int sizingSlippageTicksPerSide = input.int(1, "Sizing slippage (ticks / side)", minval = 0, group = GROUP_RISK)
 
 // ============================================================================
-// Backtest / execution filters
+// 07. Backtest / execution filters
 // ============================================================================
-string GROUP_FILTER = "06. Backtest / Execution Filters"
+string GROUP_FILTER = "07. Backtest / Execution Filters"
 string tradeDirection = input.string("Both", "Trade direction", options = ["Both", "Long only", "Short only"], group = GROUP_FILTER)
 bool restrictTimeframes = input.bool(true, "Trade only 5m, 15m, 1H", group = GROUP_FILTER)
 bool useDateFilter = input.bool(false, "Use date filter", group = GROUP_FILTER)
 int backtestStart = input.time(timestamp("1 Jan 2023 00:00 +0000"), "Backtest start", group = GROUP_FILTER)
-int backtestEnd = input.time(timestamp("31 Dec 2030 23:59 +0000"), "Backtest end", group = GROUP_FILTER)
-bool useSessionFilter = input.bool(false, "Use session filter", group = GROUP_FILTER)
+int backtestEnd = input.time(timestamp("31 Mar 2026 23:59 +0000"), "Backtest end", group = GROUP_FILTER,
+     tooltip = "Matches the published PineScriptForge research window when date filtering is enabled.")
+bool useSessionFilter = input.bool(true, "Use liquidity session filter", group = GROUP_FILTER,
+     tooltip = "Enabled by default because ES order-flow quality is materially different overnight.")
 string tradeSession = input.session("0930-1600", "Trading session", group = GROUP_FILTER)
 string sessionTimezone = input.string("America/New_York", "Session timezone", group = GROUP_FILTER,
-     tooltip = "IANA timezone recommended, e.g. America/New_York. DST is handled automatically.")
+     tooltip = "IANA timezone. America/New_York handles DST automatically.")
 int cooldownBars = input.int(0, "Cooldown bars after position closes", minval = 0, group = GROUP_FILTER)
 
 // ============================================================================
-// Visuals
+// 08. Visuals
 // ============================================================================
-string GROUP_VIS = "07. Visuals"
+string GROUP_VIS = "08. Visuals"
 bool showPivots = input.bool(true, "Show confirmed pivots", group = GROUP_VIS)
 bool showDivergenceLines = input.bool(true, "Draw divergence lines", group = GROUP_VIS)
 bool showTradeLevels = input.bool(true, "Plot active stop / target", group = GROUP_VIS)
 bool showStatusTable = input.bool(true, "Show status table", group = GROUP_VIS)
 
 // ============================================================================
-// Order-flow series
+// Order-flow and regime series
 // ============================================================================
 [upVolumeRaw, downVolumeRaw, barDelta] = tvta.requestUpAndDownVolume(lowerTf)
 [cvdOpen, cvdHigh, cvdLow, cvdClose] = tvta.requestVolumeDelta(lowerTf, cvdAnchorTf)
@@ -127,6 +143,7 @@ float buyRatio = aggressorTotal > 0 ? buyVolume / aggressorTotal : na
 float sellRatio = aggressorTotal > 0 ? sellVolume / aggressorTotal : na
 float volumeAverage = ta.sma(volume, volumeAverageLength)
 float atrValue = ta.atr(atrLength)
+[plusDI, minusDI, adxValue] = ta.dmi(adxDiLength, adxSmoothing)
 
 plot(cvdClose, "Cumulative Delta", display = display.data_window)
 plot(barDelta, "Bar Delta", display = display.data_window)
@@ -134,6 +151,7 @@ plot(volume, "Volume", display = display.data_window)
 plot(buyRatio * 100.0, "Buy Aggressor Ratio %", display = display.data_window)
 plot(sellRatio * 100.0, "Sell Aggressor Ratio %", display = display.data_window)
 plot(atrValue, "ATR", display = display.data_window)
+plot(adxValue, "ADX", display = display.data_window)
 
 // ============================================================================
 // Helpers
@@ -156,13 +174,6 @@ f_aggressorConfirmed(bool volumeDecline, bool ratioDecline, string mode) =>
         "Volume only" => volumeDecline
         "Ratio only" => ratioDecline
         => volumeDecline and ratioDecline
-
-f_stopScale(string preset, float customScale) =>
-    switch preset
-        "Conservative" => 0.70
-        "Aggressive" => 1.40
-        "Custom" => customScale
-        => 1.00
 
 f_sizeScale(string preset, float customScale) =>
     switch preset
@@ -197,11 +208,10 @@ bool recommendedTimeframe = chartSeconds == 5.0 * 60.0 or chartSeconds == 15.0 *
 bool timeframeAllowed = not restrictTimeframes or recommendedTimeframe
 bool dateAllowed = not useDateFilter or (time >= backtestStart and time <= backtestEnd)
 bool sessionAllowed = not useSessionFilter or not na(time(timeframe.period, tradeSession, sessionTimezone))
+bool regimeAllowed = not useAdxFilter or adxValue >= minAdx
 bool longDirectionAllowed = tradeDirection != "Short only"
 bool shortDirectionAllowed = tradeDirection != "Long only"
 bool deltaAvailable = not na(cvdClose) and not na(barDelta) and aggressorTotal > 0
-
-float presetStopScale = f_stopScale(riskPreset, customStopScale)
 float presetSizeScale = f_sizeScale(riskPreset, customSizeScale)
 
 // ============================================================================
@@ -221,8 +231,6 @@ var float lastHighBuyRatio = na
 var float lastHighTotalVol = na
 var int lastHighAnchor = na
 var int lastHighIndex = na
-var float prevHighPrice = na
-var int prevHighIndex = na
 
 var float lastLowPrice = na
 var float lastLowCvd = na
@@ -231,8 +239,6 @@ var float lastLowSellRatio = na
 var float lastLowTotalVol = na
 var int lastLowAnchor = na
 var int lastLowIndex = na
-var float prevLowPrice = na
-var int prevLowIndex = na
 
 bool bearishDivergence = false
 bool bullishDivergence = false
@@ -244,7 +250,7 @@ float bearishRR = na
 float bullishRR = na
 
 // ============================================================================
-// Bearish divergence: price HH + CVD LH + declining buy aggression
+// Bearish divergence: HH in price, LH in CVD, declining buy aggression
 // ============================================================================
 if newHighPivot
     float currentHighPrice = pivotHigh
@@ -269,37 +275,32 @@ if newHighPivot
     bool totalVolumeConfirmed = not useTotalVolumeDecline or f_declined(currentTotalVol, lastHighTotalVol, minAggressorDeclinePct)
     bool relativeVolumeConfirmed = not useRelativeVolumeFilter or (not na(currentVolumeAverage) and currentTotalVol >= currentVolumeAverage * minVolumeVsAveragePct / 100.0)
 
-    float priorSwingLow = na
-    if not na(lastLowIndex) and lastLowIndex < currentIndex
-        priorSwingLow := lastLowPrice + targetBufferTicks * syminfo.mintick
-    else if not na(prevLowIndex) and prevLowIndex < currentIndex
-        priorSwingLow := prevLowPrice + targetBufferTicks * syminfo.mintick
+    bool hasInterveningLow = not na(lastLowIndex) and not na(lastHighIndex) and lastLowIndex > lastHighIndex and lastLowIndex < currentIndex
+    bool structureConfirmed = not requireInterveningSwing or hasInterveningLow
+    float priorSwingLow = hasInterveningLow ? lastLowPrice + targetBufferTicks * syminfo.mintick : (not requireInterveningSwing and not na(lastLowIndex) and lastLowIndex < currentIndex ? lastLowPrice + targetBufferTicks * syminfo.mintick : na)
 
-    float baseAtrBuffer = stopMode == "Pivot + ATR buffer" ? currentAtr * atrBufferMultiple : 0.0
-    float baseStopDistanceBeyondPivot = stopBufferTicks * syminfo.mintick + baseAtrBuffer
-    float rawStop = currentHighPrice + baseStopDistanceBeyondPivot * presetStopScale
-    // Conservative scaling may never move the stop inside the divergence pivot.
-    bearishStop := math.max(rawStop, currentHighPrice + syminfo.mintick)
-
+    float atrBuffer = stopMode == "Pivot + ATR buffer" ? currentAtr * atrBufferMultiple : 0.0
+    bearishStop := currentHighPrice + stopBufferTicks * syminfo.mintick + atrBuffer
     float riskDistance = bearishStop - close
     float rrTargetPrice = close - riskDistance * targetRR
     bearishTarget := switch targetMode
         "Risk / Reward" => rrTargetPrice
-        "Nearest of swing or R:R" => not na(priorSwingLow) ? math.max(priorSwingLow, rrTargetPrice) : rrTargetPrice
+        "Farther of swing or R:R" => not na(priorSwingLow) ? math.min(priorSwingLow, rrTargetPrice) : rrTargetPrice
         => priorSwingLow
 
     bearishRR := f_setupRR(false, close, bearishStop, bearishTarget)
+    float entryDrift = currentHighPrice - close
+    bool driftValid = maxEntryDriftAtr <= 0 or (currentAtr > 0 and entryDrift <= currentAtr * maxEntryDriftAtr)
+    bool stopAtrValid = maxStopAtr <= 0 or (currentAtr > 0 and riskDistance > 0 and riskDistance <= currentAtr * maxStopAtr)
     bool targetValid = not na(bearishTarget) and bearishTarget < close
     bool rrValid = targetValid and (minimumRR <= 0 or bearishRR >= minimumRR) and (maximumRR <= 0 or bearishRR <= maximumRR)
 
-    bearishDivergence := separationValid and priceHigherHigh and cvdLowerHigh and sameAnchor and aggressorConfirmed and initialRatioConfirmed and totalVolumeConfirmed and relativeVolumeConfirmed and rrValid
+    bearishDivergence := separationValid and priceHigherHigh and cvdLowerHigh and sameAnchor and structureConfirmed and aggressorConfirmed and initialRatioConfirmed and totalVolumeConfirmed and relativeVolumeConfirmed and driftValid and stopAtrValid and rrValid
 
     if bearishDivergence and showDivergenceLines
         line.new(lastHighIndex, lastHighPrice, currentIndex, currentHighPrice, xloc = xloc.bar_index, color = color.red, width = 2)
-        label.new(currentIndex, currentHighPrice, "Bear CVD\nBuy agg ↓", xloc = xloc.bar_index, style = label.style_label_down, color = color.red, textcolor = color.white, size = size.tiny)
+        label.new(currentIndex, currentHighPrice, "Bear CVD\nRR " + str.tostring(bearishRR, "#.##"), xloc = xloc.bar_index, style = label.style_label_down, color = color.red, textcolor = color.white, size = size.tiny)
 
-    prevHighPrice := lastHighPrice
-    prevHighIndex := lastHighIndex
     lastHighPrice := currentHighPrice
     lastHighCvd := currentHighCvd
     lastHighBuyVol := currentBuyVol
@@ -309,7 +310,7 @@ if newHighPivot
     lastHighIndex := currentIndex
 
 // ============================================================================
-// Bullish divergence: price LL + CVD HL + declining sell aggression
+// Bullish divergence: LL in price, HL in CVD, declining sell aggression
 // ============================================================================
 if newLowPivot
     float currentLowPrice = pivotLow
@@ -334,36 +335,32 @@ if newLowPivot
     bool totalVolumeConfirmed = not useTotalVolumeDecline or f_declined(currentTotalVol, lastLowTotalVol, minAggressorDeclinePct)
     bool relativeVolumeConfirmed = not useRelativeVolumeFilter or (not na(currentVolumeAverage) and currentTotalVol >= currentVolumeAverage * minVolumeVsAveragePct / 100.0)
 
-    float priorSwingHigh = na
-    if not na(lastHighIndex) and lastHighIndex < currentIndex
-        priorSwingHigh := lastHighPrice - targetBufferTicks * syminfo.mintick
-    else if not na(prevHighIndex) and prevHighIndex < currentIndex
-        priorSwingHigh := prevHighPrice - targetBufferTicks * syminfo.mintick
+    bool hasInterveningHigh = not na(lastHighIndex) and not na(lastLowIndex) and lastHighIndex > lastLowIndex and lastHighIndex < currentIndex
+    bool structureConfirmed = not requireInterveningSwing or hasInterveningHigh
+    float priorSwingHigh = hasInterveningHigh ? lastHighPrice - targetBufferTicks * syminfo.mintick : (not requireInterveningSwing and not na(lastHighIndex) and lastHighIndex < currentIndex ? lastHighPrice - targetBufferTicks * syminfo.mintick : na)
 
-    float baseAtrBuffer = stopMode == "Pivot + ATR buffer" ? currentAtr * atrBufferMultiple : 0.0
-    float baseStopDistanceBeyondPivot = stopBufferTicks * syminfo.mintick + baseAtrBuffer
-    float rawStop = currentLowPrice - baseStopDistanceBeyondPivot * presetStopScale
-    bullishStop := math.min(rawStop, currentLowPrice - syminfo.mintick)
-
+    float atrBuffer = stopMode == "Pivot + ATR buffer" ? currentAtr * atrBufferMultiple : 0.0
+    bullishStop := currentLowPrice - stopBufferTicks * syminfo.mintick - atrBuffer
     float riskDistance = close - bullishStop
     float rrTargetPrice = close + riskDistance * targetRR
     bullishTarget := switch targetMode
         "Risk / Reward" => rrTargetPrice
-        "Nearest of swing or R:R" => not na(priorSwingHigh) ? math.min(priorSwingHigh, rrTargetPrice) : rrTargetPrice
+        "Farther of swing or R:R" => not na(priorSwingHigh) ? math.max(priorSwingHigh, rrTargetPrice) : rrTargetPrice
         => priorSwingHigh
 
     bullishRR := f_setupRR(true, close, bullishStop, bullishTarget)
+    float entryDrift = close - currentLowPrice
+    bool driftValid = maxEntryDriftAtr <= 0 or (currentAtr > 0 and entryDrift <= currentAtr * maxEntryDriftAtr)
+    bool stopAtrValid = maxStopAtr <= 0 or (currentAtr > 0 and riskDistance > 0 and riskDistance <= currentAtr * maxStopAtr)
     bool targetValid = not na(bullishTarget) and bullishTarget > close
     bool rrValid = targetValid and (minimumRR <= 0 or bullishRR >= minimumRR) and (maximumRR <= 0 or bullishRR <= maximumRR)
 
-    bullishDivergence := separationValid and priceLowerLow and cvdHigherLow and sameAnchor and aggressorConfirmed and initialRatioConfirmed and totalVolumeConfirmed and relativeVolumeConfirmed and rrValid
+    bullishDivergence := separationValid and priceLowerLow and cvdHigherLow and sameAnchor and structureConfirmed and aggressorConfirmed and initialRatioConfirmed and totalVolumeConfirmed and relativeVolumeConfirmed and driftValid and stopAtrValid and rrValid
 
     if bullishDivergence and showDivergenceLines
         line.new(lastLowIndex, lastLowPrice, currentIndex, currentLowPrice, xloc = xloc.bar_index, color = color.lime, width = 2)
-        label.new(currentIndex, currentLowPrice, "Bull CVD\nSell agg ↓", xloc = xloc.bar_index, style = label.style_label_up, color = color.lime, textcolor = color.black, size = size.tiny)
+        label.new(currentIndex, currentLowPrice, "Bull CVD\nRR " + str.tostring(bullishRR, "#.##"), xloc = xloc.bar_index, style = label.style_label_up, color = color.lime, textcolor = color.black, size = size.tiny)
 
-    prevLowPrice := lastLowPrice
-    prevLowIndex := lastLowIndex
     lastLowPrice := currentLowPrice
     lastLowCvd := currentLowCvd
     lastLowSellVol := currentSellVol
@@ -380,7 +377,7 @@ if strategy.position_size == 0 and strategy.position_size[1] != 0
     lastExitBar := bar_index
 
 bool cooldownAllowed = cooldownBars <= 0 or na(lastExitBar) or bar_index - lastExitBar > cooldownBars
-bool commonGate = timeframeAllowed and dateAllowed and sessionAllowed and deltaAvailable and cooldownAllowed and strategy.position_size == 0
+bool commonGate = timeframeAllowed and dateAllowed and sessionAllowed and regimeAllowed and deltaAvailable and cooldownAllowed and strategy.position_size == 0
 bool longSignal = bullishDivergence and commonGate and longDirectionAllowed
 bool shortSignal = bearishDivergence and commonGate and shortDirectionAllowed
 bool enterLong = longSignal and not shortSignal
@@ -392,6 +389,7 @@ bool enterShort = shortSignal and not longSignal
 var float activeStop = na
 var float activeTarget = na
 var float activeQty = na
+var float activeSetupRR = na
 
 if enterLong
     float qty = f_contractQty(close, bullishStop, presetSizeScale)
@@ -399,9 +397,10 @@ if enterLong
         activeStop := bullishStop
         activeTarget := bullishTarget
         activeQty := qty
+        activeSetupRR := bullishRR
         strategy.entry("Long", strategy.long, qty = qty, comment = "Bull CVD Div")
         strategy.exit("Long Exit", from_entry = "Long", stop = activeStop, limit = activeTarget)
-        alert("Bullish CVD divergence | Qty " + str.tostring(qty) + " | Stop " + str.tostring(activeStop, format.mintick) + " | Target " + str.tostring(activeTarget, format.mintick), alert.freq_once_per_bar_close)
+        alert("Bullish CVD divergence | Qty " + str.tostring(qty) + " | RR " + str.tostring(bullishRR, "#.##") + " | Stop " + str.tostring(activeStop, format.mintick) + " | Target " + str.tostring(activeTarget, format.mintick), alert.freq_once_per_bar_close)
 
 else if enterShort
     float qty = f_contractQty(close, bearishStop, presetSizeScale)
@@ -409,14 +408,16 @@ else if enterShort
         activeStop := bearishStop
         activeTarget := bearishTarget
         activeQty := qty
+        activeSetupRR := bearishRR
         strategy.entry("Short", strategy.short, qty = qty, comment = "Bear CVD Div")
         strategy.exit("Short Exit", from_entry = "Short", stop = activeStop, limit = activeTarget)
-        alert("Bearish CVD divergence | Qty " + str.tostring(qty) + " | Stop " + str.tostring(activeStop, format.mintick) + " | Target " + str.tostring(activeTarget, format.mintick), alert.freq_once_per_bar_close)
+        alert("Bearish CVD divergence | Qty " + str.tostring(qty) + " | RR " + str.tostring(bearishRR, "#.##") + " | Stop " + str.tostring(activeStop, format.mintick) + " | Target " + str.tostring(activeTarget, format.mintick), alert.freq_once_per_bar_close)
 
 if strategy.position_size == 0 and strategy.position_size[1] != 0
     activeStop := na
     activeTarget := na
     activeQty := na
+    activeSetupRR := na
 
 plot(showTradeLevels ? activeStop : na, "Active Stop", color = color.red, style = plot.style_linebr, linewidth = 2)
 plot(showTradeLevels ? activeTarget : na, "Active Target", color = color.green, style = plot.style_linebr, linewidth = 2)
@@ -426,21 +427,25 @@ plotshape(showPivots and newLowPivot, title = "Swing Low", style = shape.triangl
 // ============================================================================
 // Status
 // ============================================================================
-var table status = table.new(position.top_right, 2, 8, border_width = 1)
+var table status = table.new(position.top_right, 2, 10, border_width = 1)
 if showStatusTable and (barstate.islastconfirmedhistory or barstate.isrealtime)
-    table.cell(status, 0, 0, "Delta")
-    table.cell(status, 1, 0, deltaAvailable ? "OK" : "NO DATA", text_color = deltaAvailable ? color.lime : color.red)
-    table.cell(status, 0, 1, "Chart TF")
-    table.cell(status, 1, 1, timeframe.period, text_color = recommendedTimeframe ? color.lime : color.orange)
-    table.cell(status, 0, 2, "Delta TF")
-    table.cell(status, 1, 2, lowerTf)
-    table.cell(status, 0, 3, "Risk preset")
-    table.cell(status, 1, 3, riskPreset)
-    table.cell(status, 0, 4, "Sizing")
-    table.cell(status, 1, 4, sizingMode)
-    table.cell(status, 0, 5, "Buy Ratio")
-    table.cell(status, 1, 5, na(buyRatio) ? "n/a" : str.tostring(buyRatio * 100.0, "#.0") + "%")
-    table.cell(status, 0, 6, "Sell Ratio")
-    table.cell(status, 1, 6, na(sellRatio) ? "n/a" : str.tostring(sellRatio * 100.0, "#.0") + "%")
-    table.cell(status, 0, 7, "Qty")
-    table.cell(status, 1, 7, na(activeQty) ? "-" : str.tostring(activeQty))
+    table.cell(status, 0, 0, "Delta source")
+    table.cell(status, 1, 0, lowerTf + "m proxy", text_color = color.orange)
+    table.cell(status, 0, 1, "Delta")
+    table.cell(status, 1, 1, deltaAvailable ? "OK" : "NO DATA", text_color = deltaAvailable ? color.lime : color.red)
+    table.cell(status, 0, 2, "Chart TF")
+    table.cell(status, 1, 2, timeframe.period, text_color = recommendedTimeframe ? color.lime : color.orange)
+    table.cell(status, 0, 3, "Session")
+    table.cell(status, 1, 3, sessionAllowed ? "OK" : "BLOCKED", text_color = sessionAllowed ? color.lime : color.orange)
+    table.cell(status, 0, 4, "ADX")
+    table.cell(status, 1, 4, str.tostring(adxValue, "#.0"), text_color = regimeAllowed ? color.lime : color.orange)
+    table.cell(status, 0, 5, "Risk preset")
+    table.cell(status, 1, 5, riskPreset)
+    table.cell(status, 0, 6, "Buy Ratio")
+    table.cell(status, 1, 6, na(buyRatio) ? "n/a" : str.tostring(buyRatio * 100.0, "#.0") + "%")
+    table.cell(status, 0, 7, "Sell Ratio")
+    table.cell(status, 1, 7, na(sellRatio) ? "n/a" : str.tostring(sellRatio * 100.0, "#.0") + "%")
+    table.cell(status, 0, 8, "Active RR")
+    table.cell(status, 1, 8, na(activeSetupRR) ? "-" : str.tostring(activeSetupRR, "#.##"))
+    table.cell(status, 0, 9, "Qty")
+    table.cell(status, 1, 9, na(activeQty) ? "-" : str.tostring(activeQty))
