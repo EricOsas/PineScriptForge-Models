@@ -263,12 +263,14 @@ if enterLong
     activeTarget := bullishTarget
     strategy.entry("Long", strategy.long, comment = "Bull CVD Div")
     strategy.exit("Long Exit", from_entry = "Long", stop = activeStop, limit = activeTarget)
+    alert("Bullish CVD divergence confirmed: price LL, CVD HL, declining sell aggression.", alert.freq_once_per_bar_close)
 
 else if enterShort
     activeStop := bearishStop
     activeTarget := bearishTarget
     strategy.entry("Short", strategy.short, comment = "Bear CVD Div")
     strategy.exit("Short Exit", from_entry = "Short", stop = activeStop, limit = activeTarget)
+    alert("Bearish CVD divergence confirmed: price HH, CVD LH, declining buy aggression.", alert.freq_once_per_bar_close)
 
 // Clear display levels only after a filled position has returned to flat.
 if strategy.position_size == 0 and strategy.position_size[1] != 0
@@ -281,14 +283,11 @@ plot(showTradeLevels ? activeTarget : na, "Active Target", color = color.green, 
 plotshape(showPivots and newHighPivot, title = "Swing High", style = shape.triangledown, location = location.abovebar, offset = -rightBars, color = color.new(color.red, 35), size = size.tiny)
 plotshape(showPivots and newLowPivot, title = "Swing Low", style = shape.triangleup, location = location.belowbar, offset = -rightBars, color = color.new(color.green, 35), size = size.tiny)
 
-alertcondition(longSignal, "Bullish CVD Divergence", "Bullish CVD divergence confirmed: price LL, CVD HL, declining sell aggression.")
-alertcondition(shortSignal, "Bearish CVD Divergence", "Bearish CVD divergence confirmed: price HH, CVD LH, declining buy aggression.")
-
 // ============================================================================
 // Status
 // ============================================================================
 var table status = table.new(position.top_right, 2, 5, border_width = 1)
-if barstate.islast and showStatusTable
+if showStatusTable and (barstate.islastconfirmedhistory or barstate.isrealtime)
     table.cell(status, 0, 0, "CVD Delta")
     table.cell(status, 1, 0, deltaAvailable ? "OK" : "NO DATA", text_color = deltaAvailable ? color.lime : color.red)
     table.cell(status, 0, 1, "Chart TF")
